@@ -57,6 +57,10 @@ structure split(char* start, char* end){
             // merge or new one
              if(type == REDIRECT){
                 list[idx].string = (char*) calloc(BUFFER_SIZE, sizeof(char));
+                char *p;
+                for(p = pleft - 1;*p != ' ' && isdigit(*p); p--); /* pleft must be at '>' or '<'
+                if(*p == ' ') /* there is a fd */
+                    pleft = p + 1; /* pleft have to contain fd too */
                 while(*pleft == ' ') pleft ++;
                 strcat(list[idx].string, pleft);
                 list[idx].type = type;
@@ -66,6 +70,7 @@ structure split(char* start, char* end){
             else{
                 if(save == '>' || save == '<'){
                     char* p;
+                    /* `cat f1 2> f2 case */
                     for(p = pc - 1; p >= pleft && *p != ' ' && isdigit(*p); p--);
                     if(*p == ' ') {
                         type = REDIRECT;
@@ -73,6 +78,7 @@ structure split(char* start, char* end){
                         goto REDIR;
                     }
                 }
+                /* command argument filter */ 
                 if(idx == 0){
                     list[idx].string = (char*) calloc(BUFFER_SIZE, sizeof(char));
                     list[idx].type = type;
@@ -90,7 +96,6 @@ structure split(char* start, char* end){
                 pleft = pc;
                 // case >>, <<
                 while(*pc == *(pc + 1) && pc != end){
-                    
                     pc ++;
                 }
                 // avoid cases like ">    tmp"
@@ -153,27 +158,31 @@ int parseRedirect(object* token, int type){
         } else return -1;
     }
     else if(type == NORMAL){
-        const int INPUT = 1;
-        const int OUTPUT = 2;
         char* str = token->string;
         int i = 0;
         int srcfd = (str[0] == '>' ? 1 : 0), dstfd = 0; // srcfd because > alone is from stdout
         int flag = 0;
         char filename[BUFFER_SIZE] = {'\0'};
+        /* fd> case */
         while(i < token->length){
-            if(isdigit(str[i])) srcfd = srcfd * 10 + str[i] - '0';
+            if(isdigit(str[i])){
+                /* the default number has bug */
+                if(srcfd == 1)
+                    srcfd = 0;
+                srcfd = srcfd * 10 + str[i] - '0';
+            }
             else break;
             i++;
         }
         if(srcfd > 1024) return -1;
-        // determine type
+        // determine type: input/output
         if(str[i] == '<'){
             flag |= O_RDONLY;
         } else if(str[i] == '>'){
             flag |= O_WRONLY;
         }
-        i++;
-        // determine 
+        i++; // move on after '>|<'
+        // determine fd or filename after ">|<"
         DETERMINE:;
         if(str[i] == '&'){
             i ++;
@@ -197,7 +206,7 @@ int parseRedirect(object* token, int type){
                 else break;
                 i++;
             }
-            /* clear file before opening file */ 
+            /* clear file before opening file if not APPENDing */ 
             if(!(flag & O_APPEND)){
                 FILE* fp = fopen(filename, "w");
                 fclose(fp);
@@ -249,7 +258,19 @@ int main(){
                 /* which means it is not special fd operation */
                 if(parseRedirect(&stru.list[i], SPECIAL) < 0) goto NORMAL_CMD;
             }
-        } else { /* if it is not `exec` on fd */
+        } else { 
+            pid_t pid = fork();
+            if(pid < 0){
+                perror("Fork failed!");
+                exit(-1);
+            } else if(pid > 0){
+                int ret;
+                waitpid(pid, &ret, 0);
+                if(ret < 0){
+                    perror("Yabai!");
+                }
+            } else{ /* create a child so that we can freely open/close their fd */
+                /* if it is not `exec` on fd */
                 NORMAL_CMD:;
                 int pipefd[2];
                 if(pipe(pipefd) < 0){
@@ -286,14 +307,15 @@ int main(){
                     for(int i = 1; i < stru.length; i++){
                         if(parseRedirect(&stru.list[i], NORMAL) < 0) exit(-1);
                     }
-                    // put output to default stdout
-                    write(STDOUT_FILENO, output, rbytes);
                     int retcmd;
                     waitpid(cmdpid, &retcmd, 0);
-                    if(retcmd != 0){
-                        fprintf(stderr, "Error in executing command. Please make sure your syntax correct.\n");
+                    if(retcmd != 0){ // fail to execute
+                        write(STDERR_FILENO, output, rbytes);
+                        exit(-1);
+                    } else { // succeed
+                        write(STDOUT_FILENO, output, rbytes);
                     }
-                    exit(0);
+                    exit(0);         
                 } 
                 else{
                     close(STDOUT_FILENO);
@@ -310,5 +332,6 @@ int main(){
                     }
                 }
             }
+        }
     }
 }
